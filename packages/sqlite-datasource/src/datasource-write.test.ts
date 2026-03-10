@@ -748,7 +748,8 @@ describe("OptimizedDatasource", () => {
 
   describe("writeLogs", () => {
     let testConnection: DatabaseSync;
-    let ds: datasource.WriteTelemetryDatasource;
+    let ds: datasource.WriteTelemetryDatasource &
+      datasource.ReadTelemetryDatasource;
 
     beforeEach(async () => {
       testConnection = initializeDatabase(":memory:");
@@ -881,7 +882,7 @@ describe("OptimizedDatasource", () => {
         TraceFlags: 0n,
         SeverityText: "",
         SeverityNumber: 0n,
-        Body: "null",
+        Body: "",
         LogAttributes: "{}",
         ResourceAttributes: "{}",
         ResourceSchemaUrl: "",
@@ -890,6 +891,20 @@ describe("OptimizedDatasource", () => {
         ScopeVersion: "",
         ScopeAttributes: "{}",
         ScopeSchemaUrl: "",
+      });
+
+      const readResult = await ds.getLogs({ limit: 10 });
+      expect(readResult.data).toHaveLength(1);
+      const log = readResult.data[0];
+      expect(log).toMatchObject({
+        Timestamp: "1000000000",
+        TraceId: "",
+        SpanId: "",
+        SeverityText: "",
+        SeverityNumber: 0,
+        Body: "",
+        ServiceName: "",
+        ScopeName: "minimal-scope",
       });
     });
   });

@@ -77,12 +77,7 @@ describe("useDashboardTree validation", () => {
   }
 
   it("renders DynamicDashboard when API returns a valid uiTree", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ uiTree: VALID_TREE }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    );
+    mockClient.getDashboard.mockResolvedValueOnce({ uiTree: VALID_TREE });
 
     setURL("?tab=metrics&dashboardId=abc");
 
@@ -96,6 +91,10 @@ describe("useDashboardTree validation", () => {
       expect(screen.getByText("Test Dashboard")).toBeTruthy();
     });
 
+    expect(mockClient.getDashboard).toHaveBeenCalledWith(
+      "abc",
+      expect.anything()
+    );
     expect(screen.queryByText(/invalid layout/i)).toBeNull();
   });
 
@@ -107,12 +106,7 @@ describe("useDashboardTree validation", () => {
       },
     };
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
-      new Response(JSON.stringify({ uiTree: invalidTree }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    );
+    mockClient.getDashboard.mockResolvedValueOnce({ uiTree: invalidTree });
 
     setURL("?tab=metrics&dashboardId=def");
 
@@ -125,5 +119,10 @@ describe("useDashboardTree validation", () => {
     await waitFor(() => {
       expect(screen.getByText(/invalid layout/i)).toBeTruthy();
     });
+
+    expect(mockClient.getDashboard).toHaveBeenCalledWith(
+      "def",
+      expect.anything()
+    );
   });
 });
