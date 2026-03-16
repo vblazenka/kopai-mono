@@ -38,6 +38,9 @@ const queryBuilder = new Kysely<DB>({
   },
 });
 
+/** Default lookback for services/operations discovery (7 days in ms). */
+const DISCOVERY_LOOKBACK_MS = 7 * 24 * 60 * 60_000;
+
 export class DbDatasource implements datasource.TelemetryDatasource {
   constructor(private sqliteConnection: DatabaseSync) {}
 
@@ -903,6 +906,292 @@ export class DbDatasource implements datasource.TelemetryDatasource {
     } catch (error) {
       if (error instanceof SqliteDatasourceQueryError) throw error;
       throw new SqliteDatasourceQueryError("Failed to discover metrics", {
+        cause: error,
+      });
+    }
+  }
+
+  async getServices(): Promise<{ services: string[] }> {
+    try {
+      const tsMin = BigInt((Date.now() - DISCOVERY_LOOKBACK_MS) * 1e6);
+      const { sql, parameters } = queryBuilder
+        .selectFrom("otel_traces")
+        .select("ServiceName")
+        .distinct()
+        .where("Timestamp", ">=", tsMin)
+        .orderBy("ServiceName", "asc")
+        .compile();
+
+      const rows = this.sqliteConnection
+        .prepare(sql)
+        .all(...(parameters as (string | number | bigint | null)[])) as {
+        ServiceName: string;
+      }[];
+
+      return { services: rows.map((r) => r.ServiceName) };
+    } catch (error) {
+      throw new SqliteDatasourceQueryError("Failed to get services", {
+        cause: error,
+      });
+    }
+  }
+
+  async getOperations(filter: {
+    serviceName: string;
+  }): Promise<{ operations: string[] }> {
+    try {
+      const tsMin = BigInt((Date.now() - DISCOVERY_LOOKBACK_MS) * 1e6);
+      const { sql, parameters } = queryBuilder
+        .selectFrom("otel_traces")
+        .select("SpanName")
+        .distinct()
+        .where("ServiceName", "=", filter.serviceName)
+        .where("Timestamp", ">=", tsMin)
+        .orderBy("SpanName", "asc")
+        .compile();
+
+      const rows = this.sqliteConnection
+        .prepare(sql)
+        .all(...(parameters as (string | number | bigint | null)[])) as {
+        SpanName: string;
+      }[];
+
+      return { operations: rows.map((r) => r.SpanName) };
+    } catch (error) {
+      throw new SqliteDatasourceQueryError("Failed to get operations", {
+        cause: error,
+      });
+    }
+  }
+
+  async getTraceSummaries(
+    filter: dataFilterSchemas.TraceSummariesFilter
+  ): Promise<{
+    data: dataFilterSchemas.TraceSummaryRow[];
+    nextCursor: string | null;
+  }> {
+    try {
+      const limit = filter.limit ?? 20;
+      const sortOrder = filter.sortOrder ?? "DESC";
+
+      // Step 1: Find matching trace IDs from otel_traces_trace_id_ts with time range + cursor
+      const traceIdClauses: string[] = ["1=1"];
+      const traceIdParams: (string | bigint)[] = [];
+
+      if (filter.timestampMin != null) {
+        traceIdClauses.push("t.Start >= ?");
+        traceIdParams.push(BigInt(filter.timestampMin));
+      }
+      if (filter.timestampMax != null) {
+        traceIdClauses.push("t.End <= ?");
+        traceIdParams.push(BigInt(filter.timestampMax));
+      }
+
+      if (filter.cursor) {
+        const colonIdx = filter.cursor.indexOf(":");
+        if (colonIdx === -1) {
+          throw new SqliteDatasourceQueryError(
+            "Invalid cursor format: expected '{timestamp}:{id}'"
+          );
+        }
+        const cursorTs = BigInt(filter.cursor.slice(0, colonIdx));
+        const cursorTraceId = filter.cursor.slice(colonIdx + 1);
+
+        if (sortOrder === "DESC") {
+          traceIdClauses.push(
+            "(t.Start < ? OR (t.Start = ? AND t.TraceId < ?))"
+          );
+          traceIdParams.push(cursorTs, cursorTs, cursorTraceId);
+        } else {
+          traceIdClauses.push(
+            "(t.Start > ? OR (t.Start = ? AND t.TraceId > ?))"
+          );
+          traceIdParams.push(cursorTs, cursorTs, cursorTraceId);
+        }
+      }
+
+      // If we have span-level filters, we need to restrict trace IDs to those
+      // containing matching spans
+      // Duration filters apply at trace level (End - Start), not span level
+      if (filter.durationMin != null) {
+        traceIdClauses.push("(t.End - t.Start) >= ?");
+        traceIdParams.push(BigInt(filter.durationMin));
+      }
+      if (filter.durationMax != null) {
+        traceIdClauses.push("(t.End - t.Start) <= ?");
+        traceIdParams.push(BigInt(filter.durationMax));
+      }
+
+      const hasSpanFilters =
+        filter.serviceName ||
+        filter.spanName ||
+        filter.spanAttributes ||
+        filter.resourceAttributes;
+
+      let spanFilterJoin = "";
+      const spanFilterParams: (string | bigint)[] = [];
+
+      if (hasSpanFilters) {
+        const spanClauses: string[] = [];
+        if (filter.serviceName) {
+          spanClauses.push("s.ServiceName = ?");
+          spanFilterParams.push(filter.serviceName);
+        }
+        if (filter.spanName) {
+          spanClauses.push("s.SpanName = ?");
+          spanFilterParams.push(filter.spanName);
+        }
+        if (filter.spanAttributes) {
+          for (const [key, value] of Object.entries(filter.spanAttributes)) {
+            const jsonPath = `$."${key.replace(/"/g, '""')}"`;
+            const safePath = jsonPath.replace(/'/g, "''");
+            spanClauses.push(
+              `json_extract(s.SpanAttributes, '${safePath}') = ?`
+            );
+            spanFilterParams.push(value);
+          }
+        }
+        if (filter.resourceAttributes) {
+          for (const [key, value] of Object.entries(
+            filter.resourceAttributes
+          )) {
+            const jsonPath = `$."${key.replace(/"/g, '""')}"`;
+            const safePath = jsonPath.replace(/'/g, "''");
+            spanClauses.push(
+              `json_extract(s.ResourceAttributes, '${safePath}') = ?`
+            );
+            spanFilterParams.push(value);
+          }
+        }
+
+        spanFilterJoin = `AND t.TraceId IN (SELECT DISTINCT TraceId FROM otel_traces s WHERE ${spanClauses.join(" AND ")})`;
+      }
+
+      const traceIdSql = `
+        SELECT t.TraceId, t.Start
+        FROM otel_traces_trace_id_ts t
+        WHERE ${traceIdClauses.join(" AND ")}
+        ${spanFilterJoin}
+        ORDER BY t.Start ${sortOrder}, t.TraceId ${sortOrder}
+        LIMIT ?
+      `;
+
+      const allTraceIdParams = [
+        ...traceIdParams,
+        ...spanFilterParams,
+        BigInt(limit + 1),
+      ];
+
+      const traceIdStmt = this.sqliteConnection.prepare(traceIdSql);
+      traceIdStmt.setReadBigInts(true);
+      const traceIdRows = traceIdStmt.all(...allTraceIdParams) as {
+        TraceId: string;
+        Start: bigint;
+      }[];
+
+      // Determine hasMore
+      const hasMore = traceIdRows.length > limit;
+      const pageTraceRows = hasMore ? traceIdRows.slice(0, limit) : traceIdRows;
+
+      if (pageTraceRows.length === 0) {
+        return { data: [], nextCursor: null };
+      }
+
+      const lastTraceRow = pageTraceRows[pageTraceRows.length - 1];
+      const nextCursor =
+        hasMore && lastTraceRow
+          ? `${lastTraceRow.Start}:${lastTraceRow.TraceId}`
+          : null;
+
+      // Step 2: Aggregate spans per trace in SQL (1 row per trace)
+      const traceIds = pageTraceRows.map((r) => r.TraceId);
+      const placeholders = traceIds.map(() => "?").join(",");
+
+      const aggSql = `
+        SELECT
+          TraceId,
+          COALESCE(MIN(CASE WHEN ParentSpanId = '' THEN ServiceName END), MIN(ServiceName)) as rootServiceName,
+          COALESCE(MIN(CASE WHEN ParentSpanId = '' THEN SpanName END), MIN(SpanName)) as rootSpanName,
+          CAST(MIN(Timestamp) AS TEXT) as startTimeNs,
+          CAST(MAX(Timestamp + Duration) - MIN(Timestamp) AS TEXT) as durationNs,
+          COUNT(*) as spanCount,
+          SUM(CASE WHEN StatusCode = 'STATUS_CODE_ERROR' THEN 1 ELSE 0 END) as errorCount
+        FROM otel_traces
+        WHERE TraceId IN (${placeholders})
+        GROUP BY TraceId
+      `;
+      const aggRows = this.sqliteConnection
+        .prepare(aggSql)
+        .all(...traceIds) as {
+        TraceId: string;
+        rootServiceName: string | null;
+        rootSpanName: string | null;
+        startTimeNs: string;
+        durationNs: string;
+        spanCount: number;
+        errorCount: number;
+      }[];
+
+      // Step 3: Per-service breakdown (small result: ~traces × avg services)
+      const svcSql = `
+        SELECT TraceId, ServiceName, COUNT(*) as cnt,
+          MAX(CASE WHEN StatusCode = 'STATUS_CODE_ERROR' THEN 1 ELSE 0 END) as hasError
+        FROM otel_traces
+        WHERE TraceId IN (${placeholders})
+        GROUP BY TraceId, ServiceName
+      `;
+      const svcRows = this.sqliteConnection
+        .prepare(svcSql)
+        .all(...traceIds) as {
+        TraceId: string;
+        ServiceName: string;
+        cnt: number;
+        hasError: number;
+      }[];
+
+      const svcMap = new Map<
+        string,
+        { name: string; count: number; hasError: boolean }[]
+      >();
+      for (const row of svcRows) {
+        let arr = svcMap.get(row.TraceId);
+        if (!arr) {
+          arr = [];
+          svcMap.set(row.TraceId, arr);
+        }
+        arr.push({
+          name: row.ServiceName,
+          count: row.cnt,
+          hasError: row.hasError === 1,
+        });
+      }
+
+      // Build lookup for aggregate rows
+      const aggMap = new Map(aggRows.map((r) => [r.TraceId, r]));
+
+      // Build results in the same order as traceIds
+      const data: dataFilterSchemas.TraceSummaryRow[] = [];
+
+      for (const traceId of traceIds) {
+        const agg = aggMap.get(traceId);
+        if (!agg) continue;
+
+        data.push({
+          traceId,
+          rootServiceName: agg.rootServiceName ?? "",
+          rootSpanName: agg.rootSpanName ?? "",
+          startTimeNs: agg.startTimeNs,
+          durationNs: agg.durationNs,
+          spanCount: agg.spanCount,
+          errorCount: agg.errorCount,
+          services: svcMap.get(traceId) ?? [],
+        });
+      }
+
+      return { data, nextCursor };
+    } catch (error) {
+      if (error instanceof SqliteDatasourceQueryError) throw error;
+      throw new SqliteDatasourceQueryError("Failed to get trace summaries", {
         cause: error,
       });
     }

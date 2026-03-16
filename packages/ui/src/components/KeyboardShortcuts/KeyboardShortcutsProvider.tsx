@@ -8,7 +8,7 @@ const GENERAL_GROUP: ShortcutGroup = {
   name: "General",
   shortcuts: [
     { keys: ["Shift", "?"], description: "Toggle shortcuts help" },
-    { keys: ["Shift", "S"], description: "Services tab" },
+    { keys: ["Shift", "T"], description: "Traces tab" },
     { keys: ["Shift", "L"], description: "Logs tab" },
     { keys: ["Shift", "M"], description: "Metrics tab" },
   ],
@@ -48,12 +48,12 @@ export function KeyboardShortcutsProvider({
 
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      const target = e.target as HTMLElement;
+      if (!(e.target instanceof HTMLElement)) return;
       if (
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.tagName === "SELECT" ||
-        target.isContentEditable
+        e.target.tagName === "INPUT" ||
+        e.target.tagName === "TEXTAREA" ||
+        e.target.tagName === "SELECT" ||
+        e.target.isContentEditable
       ) {
         return;
       }
@@ -70,7 +70,7 @@ export function KeyboardShortcutsProvider({
         return;
       }
 
-      if (e.shiftKey && e.key === "S") {
+      if (e.shiftKey && e.key === "T") {
         e.preventDefault();
         onNavigateServices();
         return;

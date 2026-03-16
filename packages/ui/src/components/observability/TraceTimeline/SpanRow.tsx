@@ -2,6 +2,8 @@ import { memo } from "react";
 import type { SpanNode } from "../types.js";
 import { TimelineBar } from "./TimelineBar.js";
 import { formatDuration } from "../utils/time.js";
+import { getServiceColor } from "../utils/colors.js";
+import { spanMatchesSearch } from "../utils/flatten-tree.js";
 
 export interface SpanRowProps {
   span: SpanNode;
@@ -16,22 +18,7 @@ export interface SpanRowProps {
   onToggleCollapse: () => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
-}
-
-function getHttpContext(span: SpanNode): string | null {
-  const attrs = span.attributes;
-  const method = attrs["http.method"];
-  const url = attrs["http.url"] || attrs["http.target"];
-  const statusCode = attrs["http.status_code"];
-
-  if (!method && !url) return null;
-
-  const parts: string[] = [];
-  if (method) parts.push(String(method));
-  if (url) parts.push(String(url));
-  if (statusCode) parts.push(`[${statusCode}]`);
-
-  return parts.join(" ");
+  uiFind?: string;
 }
 
 export const SpanRow = memo(function SpanRow({
@@ -46,10 +33,12 @@ export const SpanRow = memo(function SpanRow({
   onToggleCollapse,
   onMouseEnter,
   onMouseLeave,
+  uiFind,
 }: SpanRowProps) {
   const hasChildren = span.children.length > 0;
   const isError = span.status === "ERROR";
-  const httpContext = getHttpContext(span);
+  const serviceColor = getServiceColor(span.serviceName);
+  const isDimmed = uiFind ? !spanMatchesSearch(span, uiFind) : false;
 
   return (
     <div
@@ -58,6 +47,10 @@ export const SpanRow = memo(function SpanRow({
           ? "bg-blue-100 dark:bg-blue-900/30 hover:bg-blue-100 dark:hover:bg-blue-900/30"
           : ""
       }`}
+      style={{
+        borderLeft: `3px solid ${serviceColor}`,
+        opacity: isDimmed ? 0.4 : 1,
+      }}
       onClick={onClick}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
@@ -135,7 +128,10 @@ export const SpanRow = memo(function SpanRow({
           </svg>
         )}
 
-        <span className="text-xs text-muted-foreground flex-shrink-0 mr-2">
+        <span
+          className="text-xs flex-shrink-0 mr-2 font-medium"
+          style={{ color: serviceColor }}
+        >
           {span.serviceName}
         </span>
 
@@ -146,12 +142,6 @@ export const SpanRow = memo(function SpanRow({
         {hasChildren && (
           <span className="text-xs text-muted-foreground flex-shrink-0 ml-1">
             ({span.children.length})
-          </span>
-        )}
-
-        {httpContext && (
-          <span className="text-xs text-muted-foreground truncate ml-2 flex-shrink-0 max-w-xs">
-            {httpContext}
           </span>
         )}
 
