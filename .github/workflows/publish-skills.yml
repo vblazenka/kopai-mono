@@ -1,0 +1,32 @@
+name: Publish Skills to Tessl
+
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "skills/**"
+
+concurrency:
+  group: publish-skills-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish-skill:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        skill:
+          - create-dashboard
+          - otel-instrumentation
+          - root-cause-analysis
+    steps:
+      - uses: actions/checkout@v6
+      - uses: tesslio/publish@main
+        with:
+          token: ${{ secrets.TESSL_API_TOKEN }}
+          path: "./skills/${{ matrix.skill }}"
+          review-threshold: "50"
