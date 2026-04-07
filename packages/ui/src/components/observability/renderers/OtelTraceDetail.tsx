@@ -1,13 +1,89 @@
+import { useState, useMemo, useCallback } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { observabilityCatalog } from "../../../lib/observability-catalog.js";
 import type { RendererComponentProps } from "../../../lib/renderer.js";
 import { TraceDetail } from "../index.js";
-import type { denormalizedSignals } from "@kopai/core";
+import { TraceSearch } from "../TraceSearch/index.js";
+import type { TraceSummary } from "../TraceSearch/index.js";
+import { useKopaiSDK } from "../../../providers/kopai-provider.js";
+import type { denormalizedSignals, dataFilterSchemas } from "@kopai/core";
 
 type OtelTracesRow = denormalizedSignals.OtelTracesRow;
+type TraceSummaryRow = dataFilterSchemas.TraceSummaryRow;
 
 type Props = RendererComponentProps<
   typeof observabilityCatalog.components.TraceDetail
 >;
+
+function isTraceSummariesSource(props: Props & { hasData: true }): boolean {
+  return props.element.dataSource?.method === "searchTraceSummariesPage";
+}
+
+function TraceSummariesView({
+  data,
+  loading,
+  error,
+}: {
+  data: unknown;
+  loading: boolean;
+  error: Error | null;
+}) {
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const client = useKopaiSDK();
+
+  const response = data as { data?: TraceSummaryRow[] } | null;
+
+  const traces = useMemo<TraceSummary[]>(() => {
+    const rows = response?.data;
+    if (!Array.isArray(rows)) return [];
+    return rows.map((row) => ({
+      traceId: row.traceId,
+      rootSpanName: row.rootSpanName,
+      serviceName: row.rootServiceName,
+      durationMs: parseInt(row.durationNs, 10) / 1e6,
+      statusCode: row.errorCount > 0 ? "ERROR" : "OK",
+      timestampMs: parseInt(row.startTimeNs, 10) / 1e6,
+      spanCount: row.spanCount,
+      services: row.services,
+      errorCount: row.errorCount,
+    }));
+  }, [response]);
+
+  const {
+    data: traceRows,
+    isFetching: traceLoading,
+    error: traceError,
+  } = useQuery<OtelTracesRow[], Error>({
+    queryKey: ["kopai", "getTrace", selectedTraceId],
+    queryFn: ({ signal }) => client.getTrace(selectedTraceId!, { signal }),
+    enabled: !!selectedTraceId,
+  });
+
+  const handleBack = useCallback(() => setSelectedTraceId(null), []);
+
+  if (selectedTraceId) {
+    return (
+      <TraceDetail
+        traceId={selectedTraceId}
+        rows={traceRows ?? []}
+        isLoading={traceLoading}
+        error={traceError ?? undefined}
+        onBack={handleBack}
+      />
+    );
+  }
+
+  return (
+    <TraceSearch
+      services={[]}
+      service=""
+      traces={traces}
+      isLoading={loading}
+      error={error ?? undefined}
+      onSelectTrace={setSelectedTraceId}
+    />
+  );
+}
 
 export function OtelTraceDetail(props: Props) {
   if (!props.hasData) {
@@ -16,8 +92,18 @@ export function OtelTraceDetail(props: Props) {
     );
   }
 
+  if (isTraceSummariesSource(props)) {
+    return (
+      <TraceSummariesView
+        data={props.data}
+        loading={props.loading}
+        error={props.error}
+      />
+    );
+  }
+
   const response = props.data as { data?: OtelTracesRow[] } | null;
-  const rows = response?.data ?? [];
+  const rows = Array.isArray(response?.data) ? response.data : [];
   const traceId = rows[0]?.TraceId ?? "";
 
   return (
