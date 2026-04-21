@@ -35,7 +35,7 @@ kopai logs search --service my-api --limit 20
 kopai metrics discover
 ```
 
-By default connects to `http://localhost:8000`.
+By default connects to `https://api.kopai.app/v2`. For local development against `@kopai/app`, pass `--url http://localhost:8000` or save it to `.kopairc`.
 
 ## Configuration
 
